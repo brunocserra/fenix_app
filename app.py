@@ -4,20 +4,17 @@ import requests
 import os
 from concurrent.futures import ThreadPoolExecutor
 
-# --- CONFIGURAÇÕES TÉCNICAS ---
 BASE_URL = "https://fenix.tecnico.ulisboa.pt/api/fenix/v1"
 ANO = "2024/2025"
-CSV_FILE = "dados_ist_automacao.csv"  # Ficheiro gerado na raiz
+CSV_FILE = "dados_ist_automacao.csv"
 
-st.set_page_config(page_title="IST Explorer | Automação", layout="wide")
+st.set_page_config(page_title="IST Explorer | Diagnóstico", layout="wide")
 
-# --- MOTOR DE EXTRAÇÃO (API -> CSV) ---
 def get_json(endpoint, params=None):
     try:
         r = requests.get(f"{BASE_URL}/{endpoint}", params=params, timeout=20)
         return r.json() if r.status_code == 200 else None
-    except:
-        return None
+    except: return None
 
 def processar_curso(curso):
     c_id = curso.get('id')
@@ -28,89 +25,70 @@ def processar_curso(curso):
     cadeiras = get_json(f"degrees/{c_id}/courses", {"academicTerm": ANO})
     if cadeiras:
         for cad in cadeiras:
-            term = cad.get('academicTerm', 'N/A')
-            if "2º Semestre" in term or "2º semestre" in term:
-                # Sanitização para CSV: remover vírgulas e aspas
+            term = str(cad.get('academicTerm', 'N/A'))
+            # FILTRO RELAXADO: Se tiver '2' e 'Sem', nós aceitamos
+            if "2" in term and ("Sem" in term or "sem" in term):
                 nome_cad = str(cad.get('name', 'N/A')).replace("'", "").replace(",", ";")
                 linha = f"'{nome_curso}','{sigla}','{cad.get('id')}','{nome_cad}','{cad.get('credits','0')}','{term}'"
                 res_list.append(linha)
     return res_list
 
 def gerar_base_dados():
-    """Varre a API e cria o ficheiro CSV na raiz do servidor"""
     dados = get_json("degrees", {"academicTerm": ANO})
-    if not dados:
-        return False
+    if not dados: return False
 
-    # Filtro de Mestrados Alameda
-    mestrados = [
-        d for d in dados 
-        if ("Master" in str(d.get('typeName', '')) or "Mestrado" in str(d.get('name', '')))
-        and "Alameda" in str(d.get('campus', ''))
-    ]
-
+    mestrados = [d for d in dados if ("Master" in str(d.get('typeName', '')) or "Mestrado" in str(d.get('name', ''))) and "Alameda" in str(d.get('campus', ''))]
+    
     total = len(mestrados)
     progress_bar = st.progress(0)
-    status_text = st.empty()
+    
+    with open(CSV_FILE, "w", encoding="utf-8-sig") as f:
+        f.write("'nome_curso','sigla','id_cadeira','nome_cadeira','ects','periodo'\n")
+        with ThreadPoolExecutor(max_workers=5) as executor:
+            for i, lista in enumerate(executor.map(processar_curso, mestrados)):
+                progress_bar.progress((i + 1) / total)
+                if lista:
+                    for linha in lista:
+                        f.write(linha + "\n")
+                    f.flush()
+    return True
 
-    try:
-        with open(CSV_FILE, "w", encoding="utf-8-sig") as f:
-            f.write("'nome_curso','sigla','id_cadeira','nome_cadeira','ects','periodo'\n")
-            
-            # 5 workers para estabilidade na Cloud
-            with ThreadPoolExecutor(max_workers=5) as executor:
-                for i, lista in enumerate(executor.map(processar_curso, mestrados)):
-                    status_text.write(f"⚙️ A extrair {i+1}/{total}: {mestrados[i].get('acronym')}")
-                    progress_bar.progress((i + 1) / total)
-                    if lista:
-                        for linha in lista:
-                            f.write(linha + "\n")
-                        f.flush()
-        return True
-    except Exception as e:
-        st.error(f"Erro ao escrever ficheiro: {e}")
-        return False
-
-# --- LOGICA DE CARREGAMENTO ---
 @st.cache_data(show_spinner=False)
-def get_data():
-    # Se o ficheiro não existe, retorna None para despoletar a criação
-    if not os.path.exists(CSV_FILE):
+def load_data():
+    if not os.path.exists(CSV_FILE) or os.path.getsize(CSV_FILE) < 80: # Se ficheiro é só o cabeçalho
         return None
     return pd.read_csv(CSV_FILE, quotechar="'", encoding="utf-8-sig")
 
-# --- INTERFACE ---
-st.title("🔍 IST Explorer Automático")
+st.title("🔍 IST Explorer - Diagnóstico de Dados")
 
-df = get_data()
+df = load_data()
 
 if df is None:
-    # Este bloco só corre se o ficheiro não existir
-    with st.status("🚀 Base de dados local não encontrada. A iniciar extração...", expanded=True) as status:
+    with st.status("🚀 Gerando dados pela primeira vez...", expanded=True):
         if gerar_base_dados():
-            status.update(label="✅ Extração concluída!", state="complete")
             st.cache_data.clear()
             st.rerun()
         else:
-            st.error("Não foi possível gerar os dados. Verifique os logs.")
+            st.error("Falha ao contactar a API.")
             st.stop()
 
-# --- DASHBOARD (SÓ APARECE COM DADOS) ---
-st.sidebar.header("Gestão de Dados")
-if st.sidebar.button("🔄 Forçar Nova Extração"):
-    if os.path.exists(CSV_FILE):
+# --- INTERFACE DE PESQUISA ---
+st.sidebar.button("🔄 Forçar Nova Extração", on_click=lambda: [os.remove(CSV_FILE) if os.path.exists(CSV_FILE) else None, st.cache_data.clear()])
+
+search = st.text_input("Filtrar por nome (ex: Energia):", "").strip()
+
+# Se o DF estiver vazio, vamos tentar ler sem filtros para ver o que lá está
+if df is not None and len(df) == 0:
+    st.warning("⚠️ O ficheiro foi gerado mas não contém cadeiras do 2º semestre. A tentar extração total...")
+    # Se chegámos aqui, o filtro de semestre falhou. Vamos apagar e tentar de novo sem filtro de semestre.
+    if st.button("Remover filtro de semestre e tentar de novo"):
         os.remove(CSV_FILE)
-    st.cache_data.clear()
-    st.rerun()
+        st.rerun()
 
-# Pesquisa e Tabela
-search = st.text_input("Pesquisar (ex: AVAC, Energia, Gestão):", "").strip()
-
-filtered_df = df.copy()
-if search:
-    mask = (df['nome_cadeira'].str.contains(search, case=False, na=False) | 
-            df['nome_curso'].str.contains(search, case=False, na=False))
-    filtered_df = filtered_df[mask]
-
-st.metric("Cadeiras Disponíveis", len(filtered_df))
-st.dataframe(filtered_df, use_container_width=True, hide_index=True)
+if df is not None:
+    filtered_df = df.copy()
+    if search:
+        filtered_df = df[df['nome_cadeira'].str.contains(search, case=False, na=False)]
+    
+    st.metric("Cadeiras Encontradas", len(filtered_df))
+    st.dataframe(filtered_df, use_container_width=True, hide_index=True)
