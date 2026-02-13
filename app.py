@@ -1,67 +1,67 @@
 import streamlit as st
 import pandas as pd
+import os
 
-# Configuração da página
-st.set_page_config(page_title="Explorador de Cursos IST", layout="wide")
+# Configuração de Engenharia da Página
+st.set_page_config(page_title="IST Explorer - Engenharia & Energia", layout="wide")
 
-st.title("🔍 Procura de Unidades Curriculares - IST")
-st.subheader("Filtro rápido para Engenharia e Gestão")
+CSV_FILE = "todos_mestrados_ist_p3.csv"
 
-# 1. Carregar os dados (usando cache para ser instantâneo)
+st.title("🔍 Explorador de Unidades Curriculares IST")
+st.markdown(f"**Ano Letivo:** 2024/2025 | **Foco:** 2º Semestre / P3")
+
 @st.cache_data
 def load_data():
-    # O encoding utf-8-sig garante que os acentos aparecem bem
-    df = pd.read_csv("todos_mestrados_ist_p3.csv", quotechar="'")
-    return df
+    if os.path.exists(CSV_FILE):
+        # quotechar="'" para lidar com as pelicas que definimos
+        return pd.read_csv(CSV_FILE, quotechar="'", encoding="utf-8-sig")
+    return None
 
-try:
-    df = load_data()
+df = load_data()
 
-    # 2. Barra Lateral para Filtros Estruturados
-    st.sidebar.header("Filtros Avançados")
+if df is not None:
+    # Barra Lateral de Filtros
+    st.sidebar.header("Parâmetros de Pesquisa")
     
-    # Filtro por Curso (Sigla)
-    cursos = st.sidebar.multiselect("Filtrar por Curso:", options=sorted(df['sigla'].unique()))
+    # Filtro por Curso
+    lista_cursos = sorted(df['nome_curso'].unique())
+    curso_selecionado = st.sidebar.multiselect("Filtrar por Mestrado:", options=lista_cursos)
     
     # Filtro por ECTS
-    ects_range = st.sidebar.slider("Créditos (ECTS):", 
-                                   float(df['ects'].min()), 
-                                   float(df['ects'].max()), 
-                                   (0.0, float(df['ects'].max())))
+    ects_max = float(df['ects'].max())
+    ects_range = st.sidebar.slider("Intervalo de Créditos (ECTS):", 0.0, ects_max, (0.0, ects_max))
 
-    # 3. Pesquisa Global (O que pediu)
-    search_query = st.text_input("Pesquisa rápida (digite o nome da cadeira, sigla ou termo técnico):", "")
+    # Pesquisa de Texto (Input Principal)
+    search = st.text_input("Pesquisa rápida (ex: Climatização, Energia, Programação):", "").strip()
 
-    # Lógica de Filtragem
+    # Lógica de Filtro Dinâmico
     filtered_df = df.copy()
-    
-    if search_query:
-        # Pesquisa em múltiplas colunas simultaneamente
+
+    if search:
         mask = (
-            df['nome_cadeira'].str.contains(search_query, case=False, na=False) |
-            df['nome_curso'].str.contains(search_query, case=False, na=False) |
-            df['sigla'].str.contains(search_query, case=False, na=False)
+            df['nome_cadeira'].str.contains(search, case=False, na=False) |
+            df['sigla'].str.contains(search, case=False, na=False)
         )
         filtered_df = filtered_df[mask]
 
-    if cursos:
-        filtered_df = filtered_df[filtered_df['sigla'].isin(cursos)]
+    if curso_selecionado:
+        filtered_df = filtered_df[filtered_df['nome_curso'].isin(curso_selecionado)]
 
     filtered_df = filtered_df[(filtered_df['ects'] >= ects_range[0]) & (filtered_df['ects'] <= ects_range[1])]
 
-    # 4. Exibição dos Resultados
-    st.write(f"Foram encontradas **{len(filtered_df)}** cadeiras.")
+    # Exibição de Resultados
+    st.metric("Cadeiras encontradas", len(filtered_df))
     
-    # Usar o dataframe interativo do Streamlit
     st.dataframe(
-        filtered_df, 
-        use_container_width=True, 
+        filtered_df,
+        use_container_width=True,
         hide_index=True,
         column_config={
-            "id_cadeira": st.column_config.TextColumn("ID"),
-            "ects": st.column_config.NumberColumn("ECTS", format="%.1f")
+            "id_cadeira": st.column_config.TextColumn("ID Fénix"),
+            "ects": st.column_config.NumberColumn("ECTS", format="%.1f"),
+            "periodo": st.column_config.TextColumn("Semestre/Período")
         }
     )
-
-except FileNotFoundError:
-    st.error("Ficheiro CSV não encontrado. Execute o script de extração primeiro.")
+else:
+    st.error("⚠️ Erro: Ficheiro de dados não encontrado no repositório.")
+    st.info("Certifique-se de que fez 'git add' e 'push' do ficheiro 'todos_mestrados_ist_p3.csv'.")
