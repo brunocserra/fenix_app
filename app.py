@@ -1,67 +1,102 @@
 import streamlit as st
 import pandas as pd
+import requests
 import os
+from concurrent.futures import ThreadPoolExecutor
 
-# Configuração de Engenharia da Página
-st.set_page_config(page_title="IST Explorer - Engenharia & Energia", layout="wide")
-
+# --- CONFIGURAÇÕES TÉCNICAS ---
+BASE_URL = "https://fenix.tecnico.ulisboa.pt/api/fenix/v1"
+ANO = "2024/2025"
 CSV_FILE = "todos_mestrados_ist_p3.csv"
 
+st.set_page_config(page_title="IST Explorer - Automação", layout="wide")
+
+# --- FUNÇÕES DE EXTRAÇÃO (BACKEND) ---
+def get_json(endpoint, params=None):
+    try:
+        r = requests.get(f"{BASE_URL}/{endpoint}", params=params, timeout=15)
+        return r.json() if r.status_code == 200 else None
+    except:
+        return None
+
+def processar_curso(curso):
+    sigla = curso.get('acronym', 'N/A')
+    c_id = curso.get('id')
+    nome_curso = curso.get('name', 'N/A')
+    res_list = []
+    
+    cadeiras = get_json(f"degrees/{c_id}/courses", {"academicTerm": ANO})
+    if cadeiras:
+        for cad in cadeiras:
+            term = cad.get('academicTerm', 'N/A')
+            if "2º Semestre" in term or "2º semestre" in term:
+                nome_cad = cad.get('name', 'N/A').replace("'", "").replace(",", ";")
+                linha = f"'{nome_curso}','{sigla}','{cad.get('id')}','{nome_cad}','{cad.get('credits','0')}','{term}'"
+                res_list.append(linha)
+    return res_list
+
+def gerar_base_dados():
+    """Lógica que consome a API e gera o CSV localmente no servidor"""
+    dados = get_json("degrees", {"academicTerm": ANO})
+    if not dados:
+        return False
+
+    mestrados = [
+        d for d in dados 
+        if ("Master" in str(d.get('typeName', '')) or "Mestrado" in str(d.get('name', '')))
+        and "Alameda" in str(d.get('campus', ''))
+    ]
+
+    with open(CSV_FILE, "w", encoding="utf-8-sig") as f:
+        f.write("'nome_curso','sigla','id_cadeira','nome_cadeira','ects','periodo'\n")
+        with ThreadPoolExecutor(max_workers=10) as executor:
+            for lista in executor.map(processar_curso, mestrados):
+                if lista:
+                    for linha in lista:
+                        f.write(linha + "\n")
+    return True
+
+# --- INTERFACE (FRONTEND) ---
 st.title("🔍 Explorador de Unidades Curriculares IST")
-st.markdown(f"**Ano Letivo:** 2024/2025 | **Foco:** 2º Semestre / P3")
 
-@st.cache_data
+@st.cache_data(show_spinner=False)
 def load_data():
+    # Se o ficheiro não existe, despoleta a geração
+    if not os.path.exists(CSV_FILE):
+        return None
+    return pd.read_csv(CSV_FILE, quotechar="'", encoding="utf-8-sig")
+
+# Lógica de Inicialização
+data = load_data()
+
+if data is None:
+    # Ecrã de "A Gerar Ficheiros"
+    with st.status("🛠️ Base de dados não detetada. A aceder à API do FénixEdu...", expanded=True) as status:
+        st.write("A identificar cursos de Mestrado na Alameda...")
+        sucesso = gerar_base_dados()
+        if sucesso:
+            status.update(label="✅ Extração concluída com sucesso!", state="complete", expanded=False)
+            st.rerun() # Reinicia a app para ler o novo ficheiro
+        else:
+            st.error("Falha ao ligar à API do IST. Verifique a ligação.")
+            st.stop()
+
+# --- INTERFACE DE PESQUISA (SÓ APARECE SE HOUVER DADOS) ---
+st.sidebar.header("Filtros")
+search = st.text_input("Procurar cadeira ou curso (ex: Energia, AVAC, Ambiente):", "").strip()
+
+# Filtros e Tabela
+filtered_df = data.copy()
+if search:
+    mask = (data['nome_cadeira'].str.contains(search, case=False, na=False) | 
+            data['nome_curso'].str.contains(search, case=False, na=False))
+    filtered_df = filtered_df[mask]
+
+st.dataframe(filtered_df, use_container_width=True, hide_index=True)
+
+# Botão para forçar atualização se necessário
+if st.sidebar.button("Forçar Atualização de Dados"):
     if os.path.exists(CSV_FILE):
-        # quotechar="'" para lidar com as pelicas que definimos
-        return pd.read_csv(CSV_FILE, quotechar="'", encoding="utf-8-sig")
-    return None
-
-df = load_data()
-
-if df is not None:
-    # Barra Lateral de Filtros
-    st.sidebar.header("Parâmetros de Pesquisa")
-    
-    # Filtro por Curso
-    lista_cursos = sorted(df['nome_curso'].unique())
-    curso_selecionado = st.sidebar.multiselect("Filtrar por Mestrado:", options=lista_cursos)
-    
-    # Filtro por ECTS
-    ects_max = float(df['ects'].max())
-    ects_range = st.sidebar.slider("Intervalo de Créditos (ECTS):", 0.0, ects_max, (0.0, ects_max))
-
-    # Pesquisa de Texto (Input Principal)
-    search = st.text_input("Pesquisa rápida (ex: Climatização, Energia, Programação):", "").strip()
-
-    # Lógica de Filtro Dinâmico
-    filtered_df = df.copy()
-
-    if search:
-        mask = (
-            df['nome_cadeira'].str.contains(search, case=False, na=False) |
-            df['sigla'].str.contains(search, case=False, na=False)
-        )
-        filtered_df = filtered_df[mask]
-
-    if curso_selecionado:
-        filtered_df = filtered_df[filtered_df['nome_curso'].isin(curso_selecionado)]
-
-    filtered_df = filtered_df[(filtered_df['ects'] >= ects_range[0]) & (filtered_df['ects'] <= ects_range[1])]
-
-    # Exibição de Resultados
-    st.metric("Cadeiras encontradas", len(filtered_df))
-    
-    st.dataframe(
-        filtered_df,
-        use_container_width=True,
-        hide_index=True,
-        column_config={
-            "id_cadeira": st.column_config.TextColumn("ID Fénix"),
-            "ects": st.column_config.NumberColumn("ECTS", format="%.1f"),
-            "periodo": st.column_config.TextColumn("Semestre/Período")
-        }
-    )
-else:
-    st.error("⚠️ Erro: Ficheiro de dados não encontrado no repositório.")
-    st.info("Certifique-se de que fez 'git add' e 'push' do ficheiro 'todos_mestrados_ist_p3.csv'.")
+        os.remove(CSV_FILE)
+    st.cache_data.clear()
+    st.rerun()
