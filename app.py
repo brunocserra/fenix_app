@@ -34,9 +34,7 @@ def processar_curso(curso):
                 linha = f"'{nome_curso}','{sigla}','{cad.get('id')}','{nome_cad}','{cad.get('credits','0')}','{term}'"
                 res_list.append(linha)
     return res_list
-
 def gerar_base_dados():
-    """Lógica que consome a API e gera o CSV localmente no servidor"""
     dados = get_json("degrees", {"academicTerm": ANO})
     if not dados:
         return False
@@ -47,13 +45,29 @@ def gerar_base_dados():
         and "Alameda" in str(d.get('campus', ''))
     ]
 
+    total = len(mestrados)
+    barra_progresso = st.progress(0)
+    texto_progresso = st.empty()
+
     with open(CSV_FILE, "w", encoding="utf-8-sig") as f:
         f.write("'nome_curso','sigla','id_cadeira','nome_cadeira','ects','periodo'\n")
-        with ThreadPoolExecutor(max_workers=10) as executor:
-            for lista in executor.map(processar_curso, mestrados):
+        
+        # Reduzimos para 5 workers para evitar bloqueios da API do IST
+        with ThreadPoolExecutor(max_workers=5) as executor:
+            for i, lista in enumerate(executor.map(processar_curso, mestrados)):
+                # Atualização visual para não parecer que crashou
+                percentagem = (i + 1) / total
+                barra_progresso.progress(percentagem)
+                texto_progresso.write(f"⚙️ Processando {i+1}/{total}: {mestrados[i].get('acronym')}")
+                
                 if lista:
                     for linha in lista:
                         f.write(linha + "\n")
+                    f.flush()
+    
+    # Limpa os indicadores de progresso após concluir
+    barra_progresso.empty()
+    texto_progresso.empty()
     return True
 
 # --- INTERFACE (FRONTEND) ---
