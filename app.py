@@ -1,78 +1,91 @@
 import streamlit as st
 import pandas as pd
-import requests
-import os
 
-# --- PARÂMETROS TÉCNICOS ---
-BASE_URL = "https://fenix.tecnico.ulisboa.pt/api/fenix/v1"
-ANO = "2024/2025"
-CSV_FILE = "dados_live.csv"
+# --- CONFIGURAÇÃO DA PÁGINA ---
+st.set_page_config(page_title="IST Planner 2026", layout="wide")
 
-st.set_page_config(page_title="IST Real-Time Generator", layout="wide")
-
-def get_json(endpoint):
+@st.cache_data
+def load_data():
+    # Carrega o CSV gerado pelo script Turbo
     try:
-        # Timeout longo para evitar o "Loading" infinito
-        r = requests.get(f"{BASE_URL}/{endpoint}", params={"academicTerm": ANO}, timeout=30)
-        return r.json() if r.status_code == 200 else None
-    except:
-        return None
+        df = pd.read_csv("planeamento_ist_detalhado_2026.csv", encoding="utf-8-sig")
+        # Garantir que o ID é tratado como string para não aparecer com vírgulas
+        df['id_cadeira'] = df['id_cadeira'].astype(str)
+        return df
+    except FileNotFoundError:
+        st.error("Ficheiro 'planeamento_ist_detalhado_2026.csv' não encontrado. Corre o script de extração primeiro.")
+        return pd.DataFrame()
 
-def gerar_dados_na_hora():
-    container = st.container()
-    dados_final = []
+# --- INTERFACE PRINCIPAL ---
+st.title("🚀 IST Course Explorer & Planner 2026")
+
+df = load_data()
+
+if not df.empty:
+    # --- FILTROS NO ECRA INICIAL ---
+    st.sidebar.header("🔍 Filtros de Procura")
     
-    # 1. Obter cursos
-    cursos = get_json("degrees")
-    if not cursos:
-        st.error("A API do IST não respondeu ao pedido inicial.")
-        return None
-
-    mestrados = [d for d in cursos if "Mestrado" in d.get('name', '') and "Alameda" in d.get('campus', '')]
-    total = len(mestrados)
+    # Procura por Nome ou Sigla do Curso
+    search_term = st.sidebar.text_input("Procurar por Curso ou Sigla", "").lower()
     
-    progresso = st.progress(0)
-    status_msg = st.empty()
+    # Filtro por Período
+    periodos = ["Todos"] + sorted(df['periodo'].unique().tolist())
+    periodo_sel = st.sidebar.selectbox("Filtrar por Período", periodos)
 
-    # 2. Extração Sequencial (Mais lenta, mas não bloqueia)
-    for i, m in enumerate(mestrados):
-        sigla = m.get('acronym')
-        status_msg.write(f"📥 A ler curso {i+1}/{total}: **{sigla}**")
+    # Aplicação dos filtros
+    mask = (
+        (df['nome_curso'].str.lower().contains(search_term) | 
+         df['sigla_curso_ref'].str.lower().contains(search_term) |
+         df['nome_cadeira'].str.lower().contains(search_term))
+    )
+    
+    if periodo_sel != "Todos":
+        mask = mask & (df['periodo'] == periodo_sel)
+    
+    df_filtered = df[mask]
+
+    # --- LISTAGEM E SELEÇÃO ---
+    st.subheader(f"Resultados ({len(df_filtered)} cadeiras encontradas)")
+    
+    # Criar uma coluna combinada para a seleção
+    df_filtered['display_name'] = df_filtered['sigla_curso_ref'] + " - " + df_filtered['nome_cadeira']
+    
+    escolha = st.selectbox("Selecione uma Unidade Curricular para ver detalhes:", 
+                          ["-- Selecione --"] + df_filtered['display_name'].tolist())
+
+    if escolha != "-- Selecione --":
+        # Extrair detalhes da linha selecionada
+        detalhe = df_filtered[df_filtered['display_name'] == escolha].iloc[0]
         
-        cadeiras = get_json(f"degrees/{m.get('id')}/courses")
-        if cadeiras:
-            for c in cadeiras:
-                term = str(c.get('academicTerm', ''))
-                if "2º Semestre" in term or "2.º Semestre" in term:
-                    dados_final.append({
-                        "Mestrado": m.get('name'),
-                        "Sigla": sigla,
-                        "Cadeira": c.get('name'),
-                        "ECTS": c.get('credits', 0),
-                        "Periodo": term
-                    })
-        progresso.progress((i + 1) / total)
-    
-    status_msg.success("Extração finalizada!")
-    return pd.DataFrame(dados_final)
+        st.divider()
+        col1, col2 = st.columns([2, 1])
+        
+        with col1:
+            st.header(detalhe['nome_cadeira'])
+            st.caption(f"ID: {detalhe['id_cadeira']} | Curso: {detalhe['nome_curso']} ({detalhe['sigla_curso_ref']})")
+            
+            st.subheader("📖 Programa")
+            st.info(detalhe['programa'] if pd.notna(detalhe['programa']) else "Programa não disponível.")
+            
+            st.subheader("📝 Método de Avaliação")
+            st.warning(detalhe['metodo_avaliacao'] if pd.notna(detalhe['metodo_avaliacao']) else "Detalhes de avaliação não especificados.")
 
-# --- INTERFACE ---
-st.title("🚀 Gerador de Dados IST em Tempo Real")
+        with col2:
+            st.metric("Créditos ECTS", detalhe['ects'])
+            st.metric("Período", detalhe['periodo'])
+            st.metric("Alunos Inscritos", detalhe['num_alunos'])
+            
+            st.subheader("👨‍🏫 Corpo Docente")
+            # Converter a string de professores (separada por |) numa lista
+            profs = detalhe['docentes'].split(" | ") if pd.notna(detalhe['docentes']) else []
+            for p in profs:
+                st.write(f"- {p}")
+            
+            st.markdown(f"[🔗 Abrir no Fénix]({detalhe['url_curso']})")
 
-if "meu_df" not in st.session_state:
-    st.session_state.meu_df = None
+    # Tabela Geral (opcional, para visão rápida)
+    with st.expander("Ver Tabela Completa"):
+        st.dataframe(df_filtered[['sigla_curso_ref', 'nome_cadeira', 'ects', 'periodo', 'num_alunos']], use_container_width=True)
 
-if st.button("Gerar/Atualizar Dados Agora"):
-    st.session_state.meu_df = gerar_dados_na_hora()
-
-if st.session_state.meu_df is not None:
-    df = st.session_state.meu_df
-    st.metric("Cadeiras encontradas", len(df))
-    
-    busca = st.text_input("Filtrar por nome:")
-    if busca:
-        df = df[df['Cadeira'].str.contains(busca, case=False, na=False)]
-    
-    st.dataframe(df, use_container_width=True, hide_index=True)
 else:
-    st.info("Clique no botão acima para iniciar a comunicação direta com o Fénix.")
+    st.warning("Aguardando carregamento de dados...")
