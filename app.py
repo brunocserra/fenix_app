@@ -3,31 +3,23 @@ import pandas as pd
 import google.generativeai as genai
 
 # --- CONFIGURAÇÃO IA ---
-# Chave fornecida pelo utilizador
+# Chave fornecida: AIzaSyCAupRudeVbP7QSSw7v4BDjG0zJ4Y5XE-0
 GENAI_KEY = "AIzaSyCAupRudeVbP7QSSw7v4BDjG0zJ4Y5XE-0"
 genai.configure(api_key=GENAI_KEY)
 
-# Configuração do Modelo Flash (Escalão Gratuito: 15 RPM / 1500 RPD)
-generation_config = {
-  "temperature": 0.2, # Menor temperatura = Respostas mais técnicas e menos criativas
-  "top_p": 0.95,
-  "top_k": 64,
-  "max_output_tokens": 2048,
-}
-
-model = genai.GenerativeModel(
-  model_name="gemini-1.5-flash",
-  generation_config=generation_config,
-)
+# Configuração rigorosa do Modelo Flash para evitar Erro 404
+# O prefixo 'models/' é essencial em algumas versões da biblioteca
+model = genai.GenerativeModel('models/gemini-1.5-flash')
 
 # --- CONFIGURAÇÃO DA PÁGINA ---
-st.set_page_config(page_title="IST Planner GPT - Full Context", layout="wide", page_icon="🎓")
+st.set_page_config(page_title="IST Planner GPT", layout="wide", page_icon="🎓")
 
 @st.cache_data
 def load_data():
     try:
-        # Carregamento do ficheiro detalhado gerado pelo script anterior
+        # Carregamento do ficheiro gerado pelo script anterior
         df = pd.read_csv("planeamento_ist_detalhado_2026.csv", encoding="utf-8-sig")
+        # Garantir que IDs não apareçam com vírgulas de milhar
         df['id_cadeira'] = df['id_cadeira'].astype(str)
         return df
     except Exception as e:
@@ -40,93 +32,98 @@ df = load_data()
 st.title("🚀 IST Smart Planner & AI Assistant")
 st.markdown("---")
 
-# Separação por Tabs: Navegação Clássica vs. Inteligência Artificial
-tab_explorador, tab_chat = st.tabs(["🔍 Explorador de Disciplinas", "🤖 Assistente IA (Contexto Total)"])
+# Abas para separação de funções
+tab_explorador, tab_chat = st.tabs(["🔍 Explorador de Disciplinas", "🤖 Assistente IA (Chat)"])
 
 # --- TAB 1: EXPLORADOR MANUAL ---
 with tab_explorador:
     st.sidebar.header("Filtros de Procura")
-    search = st.sidebar.text_input("Procurar por Nome, Sigla ou ID", "").lower()
+    # Filtro por texto (Nome, Sigla ou ID)
+    search = st.sidebar.text_input("Procurar (Ex: MEGE, Aero, 3379...)", "").lower()
     
-    # Lógica de filtragem rápida para a interface manual
+    # Filtro por Período
+    periodos = ["Todos"] + sorted(df['periodo'].dropna().unique().tolist())
+    periodo_sel = st.sidebar.selectbox("Filtrar por Período", periodos)
+
     mask = (df['sigla_curso_ref'].str.lower().str.contains(search, na=False) | 
             df['nome_cadeira'].str.lower().str.contains(search, na=False) |
             df['id_cadeira'].str.contains(search, na=False))
     
+    if periodo_sel != "Todos":
+        mask = mask & (df['periodo'] == periodo_sel)
+    
     df_filtered = df[mask]
     
     if not df_filtered.empty:
-        # Seletor formatado com pelicas conforme solicitado no perfil
+        # Formatação de etiquetas usando pelicas conforme as preferências
         df_filtered['label'] = "[" + df_filtered['sigla_curso_ref'] + "] " + df_filtered['nome_cadeira']
         
-        escolha = st.selectbox("Selecione uma Unidade Curricular:", ["-- Escolha uma opção --"] + sorted(df_filtered['label'].tolist()))
+        escolha = st.selectbox("Selecione uma disciplina para detalhes:", ["-- Selecione --"] + sorted(df_filtered['label'].tolist()))
         
-        if escolha != "-- Escolha uma opção --":
+        if escolha != "-- Selecione --":
             row = df_filtered[df_filtered['label'] == escolha].iloc[0]
             
             c1, c2 = st.columns([2, 1])
             with c1:
                 st.header(row['nome_cadeira'])
                 st.subheader("📖 Programa")
-                st.write(row['programa'] if pd.notna(row['programa']) else "N/A")
+                st.write(row['programa'] if pd.notna(row['programa']) else "Informação não disponível.")
+                
                 st.subheader("📝 Método de Avaliação")
-                st.info(row['metodo_avaliacao'] if pd.notna(row['metodo_avaliacao']) else "N/A")
+                st.info(row['metodo_avaliacao'] if pd.notna(row['metodo_avaliacao']) else "Detalhes não especificados.")
             
             with c2:
-                st.metric("ECTS", row['ects'])
-                st.metric("Período", row['periodo'])
-                st.write("**👨‍🏫 Docentes:**")
-                for d in str(row['docentes']).split(" | "):
+                st.metric("Créditos ECTS", row['ects'])
+                st.metric("Período Letivo", row['periodo'])
+                st.write("**👨‍🏫 Corpo Docente:**")
+                docentes = str(row['docentes']).split(" | ") if pd.notna(row['docentes']) else ["Não listados"]
+                for d in docentes:
                     st.write(f"- {d}")
-                st.link_button("🌐 Abrir no Fénix", row['url_curso'])
+                st.divider()
+                st.link_button("🌐 Ver no Fénix", row['url_curso'])
     else:
-        st.warning("Nenhuma disciplina encontrada.")
+        st.warning("Nenhuma disciplina encontrada com os critérios atuais.")
 
 # --- TAB 2: ASSISTENTE IA (CHAT) ---
 with tab_chat:
-    st.header("🤖 Conversar com os Dados do IST")
-    st.caption("O Gemini Flash está a ler o teu ficheiro completo para responder.")
+    st.header("🤖 Inteligência Artificial sobre o IST")
+    st.info("O assistente utiliza o modelo **Gemini 1.5 Flash** e tem acesso a toda a tabela CSV.")
 
-    # Preparação do Contexto para a IA (Enviando a tabela completa sem filtros)
-    # Convertemos para Markdown para a IA entender melhor a estrutura de tabela
-    contexto_ia = df[['sigla_curso_ref', 'nome_cadeira', 'ects', 'periodo', 'metodo_avaliacao', 'programa']].to_markdown(index=False)
+    # Preparação do contexto: CSV é mais eficiente que Markdown para o Flash
+    # Enviamos apenas colunas essenciais para poupar tokens e manter a precisão
+    contexto_ia = df[['sigla_curso_ref', 'nome_cadeira', 'ects', 'periodo', 'metodo_avaliacao', 'programa']].to_csv(index=False)
 
     if "messages" not in st.session_state:
         st.session_state.messages = []
 
-    # Exibição das mensagens do histórico
+    # Histórico de conversação
     for message in st.session_state.messages:
         with st.chat_message(message["role"]):
             st.markdown(message["content"])
 
-    # Entrada do Chat
-    if prompt := st.chat_input("Ex: Quais as cadeiras de Aeroespacial com projetos em grupo no P4?"):
-        # Adicionar pergunta do utilizador ao histórico
+    if prompt := st.chat_input("Pergunte algo (ex: Quais as cadeiras de P4 com exame em MEGE?)"):
         st.session_state.messages.append({"role": "user", "content": prompt})
         with st.chat_message("user"):
             st.markdown(prompt)
 
         with st.chat_message("assistant"):
-            # Prompt de Sistema para garantir rigor técnico
+            # Prompt de Engenharia para o Gemini
             full_prompt = f"""
-            Contexto: Tu és um consultor de planeamento académico do Instituto Superior Técnico.
-            Estás a analisar os dados do 2º Semestre de 2025/2026.
-            O utilizador é um Engenheiro Aeroespacial e empresário que valoriza rigor e dados estruturados.
+            Tu és um consultor de planeamento académico do IST.
+            O teu utilizador é um Engenheiro Aeroespacial e empresário. Responde de forma estruturada.
             
-            Instrução: Responde à pergunta usando EXCLUSIVAMENTE os dados fornecidos abaixo. 
-            Se a resposta envolver fórmulas ou referências a colunas, usa pelicas (ex: `nome_cadeira`).
-            
-            DADOS (CSV/Markdown):
+            Usa APENAS os dados abaixo para responder:
             {contexto_ia}
             
+            Regra: Ao referir nomes de colunas como sigla_curso_ref ou nome_cadeira, usa sempre `pelicas`.
             Pergunta: {prompt}
             """
             
             try:
-                # Gerar resposta via API
+                # Geração da resposta
                 response = model.generate_content(full_prompt)
                 st.markdown(response.text)
-                # Guardar resposta no histórico
                 st.session_state.messages.append({"role": "assistant", "content": response.text})
             except Exception as e:
-                st.error(f"Erro na comunicação com o Gemini: {e}")
+                st.error(f"Erro na API Gemini: {e}")
+                st.write("Dica: Verifica se instalaste a versão mais recente da biblioteca: pip install -U google-generativeai")
