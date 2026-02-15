@@ -3,13 +3,18 @@ import pandas as pd
 import google.generativeai as genai
 
 # --- CONFIGURAÇÃO IA ---
-# Chave: AIzaSyCAupRudeVbP7QSSw7v4BDjG0zJ4Y5XE-0
 GENAI_KEY = "AIzaSyCAupRudeVbP7QSSw7v4BDjG0zJ4Y5XE-0"
 genai.configure(api_key=GENAI_KEY)
 
-# Configuração para o modelo Flash (Gratuito)
-# Nota: Se gemini-1.5-flash der 404, a biblioteca precisa de ser atualizada no requirements.txt
-model = genai.GenerativeModel('gemini-1.5-flash')
+# Tentativa de inicialização robusta
+try:
+    model = genai.GenerativeModel('gemini-1.5-flash')
+    # Teste rápido para validar se o modelo responde
+    _test = model.generate_content("test") 
+    api_ready = True
+except Exception as e:
+    api_ready = False
+    erro_msg = str(e)
 
 # --- CONFIGURAÇÃO DA PÁGINA ---
 st.set_page_config(page_title="IST Planner GPT", layout="wide", page_icon="🎓")
@@ -26,77 +31,64 @@ def load_data():
 
 df = load_data()
 
+# --- INTERFACE ---
 st.title("🚀 IST Smart Planner & AI Assistant")
-st.markdown("---")
 
-tab_explorador, tab_chat = st.tabs(["🔍 Explorador Manual", "🤖 Assistente IA (Flash)"])
+if not api_ready:
+    st.error(f"⚠️ Erro ao ligar ao Gemini 1.5 Flash: {erro_msg}")
+    with st.expander("🛠️ Diagnóstico de Engenharia - Modelos Disponíveis"):
+        try:
+            # Lista todos os modelos disponíveis para esta chave
+            modelos = [m.name for m in genai.list_models()]
+            st.write("A tua chave API tem acesso aos seguintes modelos:")
+            st.code("\n".join(modelos))
+            st.info("Dica: Se 'models/gemini-1.5-flash' não aparecer, a tua região ou versão do SDK pode estar limitada.")
+        except Exception as diag_err:
+            st.write(f"Não foi possível listar os modelos: {diag_err}")
+
+tab_explorador, tab_chat = st.tabs(["🔍 Explorador Manual", "🤖 Assistente IA"])
 
 # --- TAB 1: EXPLORADOR MANUAL ---
 with tab_explorador:
     st.sidebar.header("Filtros")
     search = st.sidebar.text_input("Procurar (Cadeira, Sigla ou ID)", "").lower()
-    
     mask = (df['sigla_curso_ref'].str.lower().str.contains(search, na=False) | 
-            df['nome_cadeira'].str.lower().str.contains(search, na=False) |
-            df['id_cadeira'].str.contains(search, na=False))
-    
+            df['nome_cadeira'].str.lower().str.contains(search, na=False))
     df_filtered = df[mask]
     
     if not df_filtered.empty:
         df_filtered['label'] = "[" + df_filtered['sigla_curso_ref'] + "] " + df_filtered['nome_cadeira']
         escolha = st.selectbox("Selecione uma UC:", ["-- Selecione --"] + sorted(df_filtered['label'].tolist()))
-        
         if escolha != "-- Selecione --":
             row = df_filtered[df_filtered['label'] == escolha].iloc[0]
-            c1, c2 = st.columns([2, 1])
-            with c1:
-                st.header(row['nome_cadeira'])
-                st.subheader("📖 Programa")
-                st.write(row['programa'] if pd.notna(row['programa']) else "N/A")
-                st.subheader("📝 Avaliação")
-                st.info(row['metodo_avaliacao'] if pd.notna(row['metodo_avaliacao']) else "N/A")
-            with c2:
-                st.metric("ECTS", row['ects'])
-                st.metric("Período", row['periodo'])
-                st.write("**Docentes:**", row['docentes'])
-                st.link_button("🌐 Fénix", row['url_curso'])
+            st.header(row['nome_cadeira'])
+            st.write(f"**Programa:** {row['programa']}")
+            st.info(f"**Avaliação:** {row['metodo_avaliacao']}")
 
 # --- TAB 2: ASSISTENTE IA (CHAT) ---
 with tab_chat:
-    st.header("🤖 Chat com o Gemini Flash")
-    
-    # Contexto em CSV (Mais eficiente e evita erros de biblioteca markdown)
-    contexto_ia = df[['sigla_curso_ref', 'nome_cadeira', 'ects', 'periodo', 'metodo_avaliacao', 'programa']].to_csv(index=False)
+    if not api_ready:
+        st.warning("O Chat está desativado devido ao erro de conexão acima.")
+    else:
+        st.header("🤖 Chat com os Dados")
+        contexto_ia = df[['sigla_curso_ref', 'nome_cadeira', 'ects', 'periodo', 'metodo_avaliacao', 'programa']].to_csv(index=False)
 
-    if "messages" not in st.session_state:
-        st.session_state.messages = []
+        if "messages" not in st.session_state:
+            st.session_state.messages = []
 
-    for message in st.session_state.messages:
-        with st.chat_message(message["role"]):
-            st.markdown(message["content"])
+        for message in st.session_state.messages:
+            with st.chat_message(message["role"]):
+                st.markdown(message["content"])
 
-    if prompt := st.chat_input("Ex: Quais as cadeiras com projetos no P4?"):
-        st.session_state.messages.append({"role": "user", "content": prompt})
-        with st.chat_message("user"):
-            st.markdown(prompt)
+        if prompt := st.chat_input("Ex: Quais as cadeiras com exame em MEGE?"):
+            st.session_state.messages.append({"role": "user", "content": prompt})
+            with st.chat_message("user"): st.markdown(prompt)
 
-        with st.chat_message("assistant"):
-            full_prompt = f"""
-            Contexto: Dados do 2º Semestre IST 2025/2026.
-            Instrução: Responde apenas com base no CSV fornecido.
-            Utilizador: Engenheiro Aeroespacial/Empresário (Sê direto e técnico).
-            Regra: Usa `pelicas` para nomes de colunas como `nome_cadeira`.
-
-            DADOS:
-            {contexto_ia}
-
-            Pergunta: {prompt}
-            """
-            
-            try:
-                response = model.generate_content(full_prompt)
-                st.markdown(response.text)
-                st.session_state.messages.append({"role": "assistant", "content": response.text})
-            except Exception as e:
-                st.error(f"Erro na API: {e}")
-                st.info("💡 Dica de Engenharia: Atualiza o teu requirements.txt para 'google-generativeai>=0.7.2'")
+            with st.chat_message("assistant"):
+                full_prompt = f"Dados IST:\n{contexto_ia}\n\nPergunta: {prompt}\nResponde de forma técnica."
+                try:
+                    response = model.generate_content(full_prompt)
+                    st.markdown(response.text)
+                    st.session_state.messages.append({"role": "assistant", "content": response.text})
+                except Exception as e:
+                    st.error(f"Erro no processamento: {e}")
